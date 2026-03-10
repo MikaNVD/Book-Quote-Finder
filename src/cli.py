@@ -4,6 +4,29 @@ from src.importer import import_csv
 from src.search import search_quotes
 
 
+def truncate_quote(text: str, soft_limit: int = 200, buffer: int = 100) -> str:
+    """
+    Truncate at the end of a sentence near soft_limit.
+    Falls back to nearest space, then hard cuts if nothing found.
+    """
+    if len(text) <= soft_limit:
+        return text
+
+    # Search for sentence-ending delimiter within the buffer range
+    search_area = text[soft_limit: soft_limit + buffer]
+    for i, char in enumerate(search_area):
+        if char in ".!?":
+            return text[:soft_limit + i + 1]
+
+    # Fallback: find nearest space before soft_limit
+    space_index = text.rfind(" ", 0, soft_limit)
+    if space_index != -1:
+        return text[:space_index] + "..."
+
+    # Hard cut as last resort
+    return text[:soft_limit] + "..."
+
+
 def display_results(results: list[dict]) -> None:
     if not results:
         print("\n📭 No quotes found. Try a different search.\n")
@@ -12,10 +35,7 @@ def display_results(results: list[dict]) -> None:
     print(f"\n✨ Found {len(results)} quote(s):\n")
 
     for i, r in enumerate(results, 1):
-        # Truncate long quotes at 300 chars
-        quote = r['quote']
-        if len(quote) > 300:
-            quote = quote[:300] + "..."
+        quote = truncate_quote(r['quote'])
 
         # Show max 3 category tags
         category = r.get('category', '')
