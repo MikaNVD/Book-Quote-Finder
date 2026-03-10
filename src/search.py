@@ -1,4 +1,5 @@
 import mysql.connector
+import random
 from typing import Optional
 from src.llm import extract_keywords, explain_match
 
@@ -8,7 +9,6 @@ def keyword_search(
     keywords: list[str],
     limit: int = 10
 ) -> list[dict]:
-    """Full-text search using MySQL MATCH...AGAINST."""
     if not keywords:
         return []
 
@@ -16,6 +16,7 @@ def keyword_search(
     cursor = conn.cursor(dictionary=True)
 
     try:
+        # Get a larger pool first, then randomly sample from it
         cursor.execute("""
             SELECT id, quote, author, category,
                    MATCH(quote, category) AGAINST (%s IN NATURAL LANGUAGE MODE) AS score
@@ -23,10 +24,21 @@ def keyword_search(
             WHERE MATCH(quote, category) AGAINST (%s IN NATURAL LANGUAGE MODE)
             ORDER BY score DESC
             LIMIT %s
-        """, (search_term, search_term, limit))
-        results = cursor.fetchall()
+        """, (search_term, search_term, limit * 10))  # fetch 50, not 5
+        
+        pool = cursor.fetchall()
+        
+        # Randomly sample from the pool so results vary each time
+        if len(pool) > limit:
+            # Take top 20 by score, then randomly sample from those only
+            top_pool = pool[:20]
+            results = random.sample(top_pool, min(limit, len(top_pool)))
+            # Re-sort the sample by score descending
+            results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        else:
+            results = pool
+            
     except mysql.connector.Error:
-        # Fallback: LIKE search if FULLTEXT fails
         results = like_search(conn, keywords, limit)
     finally:
         cursor.close()
