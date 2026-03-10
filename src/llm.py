@@ -60,8 +60,13 @@ Output:"""
             pass  # Fall through to fallback
 
     # Fallback: naive keyword extraction (remove stopwords)
-    stopwords = {"find", "me", "about", "some", "a", "the", "in", "for",
-                 "and", "or", "give", "show", "quotes", "something"}
+    stopwords = {
+    "find", "me", "about", "some", "a", "the", "in", "for",
+    "and", "or", "give", "show", "quotes", "something", "quote",
+    "want", "need", "looking", "search", "get", "please", "like",
+    "related", "topic", "theme", "regarding", "concerning", "with",
+    "any", "good", "great", "best", "nice", "interesting"
+}
     words = user_query.lower().split()
     return [w for w in words if w not in stopwords and len(w) > 3][:5]
 
