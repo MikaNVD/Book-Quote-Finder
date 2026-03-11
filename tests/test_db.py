@@ -1,10 +1,13 @@
 import pytest
-from unittest.mock import MagicMock, patch, call
-from src.db import get_connection, ensure_schema
+from unittest.mock import MagicMock, patch
+
+from mysql.connector import Error
+
+from src.db import ensure_schema, get_connection
 
 
 def test_get_connection_returns_none_on_failure():
-    with patch("src.db.mysql.connector.connect", side_effect=Exception("Connection refused")):
+    with patch("src.db.mysql.connector.connect", side_effect=Error("Connection refused")):
         result = get_connection(host="localhost", user="root", password="wrong", database="test")
         assert result is None
 
@@ -33,6 +36,8 @@ def test_get_connection_returns_connection_on_success():
 def test_ensure_schema_executes_create_table():
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
+    mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+    mock_cursor.__exit__ = MagicMock(return_value=False)
     mock_conn.cursor.return_value = mock_cursor
 
     ensure_schema(mock_conn)
@@ -42,12 +47,13 @@ def test_ensure_schema_executes_create_table():
     assert "CREATE TABLE IF NOT EXISTS quotes" in sql_called
 
 
-def test_ensure_schema_commits_and_closes():
+def test_ensure_schema_commits():
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
+    mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+    mock_cursor.__exit__ = MagicMock(return_value=False)
     mock_conn.cursor.return_value = mock_cursor
 
     ensure_schema(mock_conn)
 
     mock_conn.commit.assert_called_once()
-    mock_cursor.close.assert_called_once()
