@@ -1,7 +1,10 @@
-import requests
 import json
+import logging
 from typing import Optional
 
+import requests
+
+logger = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen2.5:0.5b"
@@ -23,13 +26,13 @@ def ask_llm(prompt: str, timeout: int = 15) -> Optional[str]:
         data = response.json()
         return data.get("response", "").strip()
     except requests.exceptions.Timeout:
-        print("[LLM] Request timed out — falling back to keyword search.")
+        logger.warning("LLM request timed out — falling back to keyword search.")
         return None
     except requests.exceptions.ConnectionError:
-        print("[LLM] Ollama not running — falling back to keyword search.")
+        logger.warning("Ollama not running — falling back to keyword search.")
         return None
     except Exception as e:
-        print(f"[LLM] Unexpected error: {e}")
+        logger.exception("Unexpected LLM error: %s", e)
         return None
 
 
@@ -61,12 +64,12 @@ Output:"""
 
     # Fallback: naive keyword extraction (remove stopwords)
     stopwords = {
-    "find", "me", "about", "some", "a", "the", "in", "for",
-    "and", "or", "give", "show", "quotes", "something", "quote",
-    "want", "need", "looking", "search", "get", "please", "like",
-    "related", "topic", "theme", "regarding", "concerning", "with",
-    "any", "good", "great", "best", "nice", "interesting"
-}
+        "a", "about", "and", "any", "best", "concerning", "find", "for",
+        "get", "give", "good", "great", "in", "interesting", "like",
+        "looking", "me", "need", "nice", "or", "please", "quote", "quotes",
+        "regarding", "related", "search", "show", "some", "something",
+        "the", "theme", "topic", "want", "with",
+    }
     words = user_query.lower().split()
     return [w for w in words if w not in stopwords and len(w) > 3][:5]
 
