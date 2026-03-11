@@ -78,6 +78,35 @@ Tests are under `tests/` and validate each of these components.
 
 ---
 
+## Schema design and indexing
+
+The application uses a single table called `quotes` in the `book_quotes` database, created by `ensure_schema` in `src/db.py`:
+
+- **`id INT AUTO_INCREMENT PRIMARY KEY`**
+  - Surrogate key for stable row identity.
+- **`quote TEXT NOT NULL`**
+  - Stores the full quote text without an artificial length limit; this is the field users actually search.
+- **`author VARCHAR(255)`**
+  - Optional; capped at 255 characters, which is sufficient for typical author names.
+- **`category VARCHAR(255)`**
+  - Optional; stores either a single category or a comma‑separated list of tags. Capped at 255 characters to keep indexes small.
+- **`quote_hash CHAR(64) UNIQUE NOT NULL`**
+  - SHA‑256 hash of the stripped `quote` text, used purely for **idempotent imports**. The `UNIQUE` constraint together with `INSERT IGNORE` ensures running the importer multiple times will not duplicate rows.
+- **`created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`**
+  - Records when the quote was first inserted.
+
+Indexes beyond the primary key:
+
+- **`INDEX idx_author (author)`**
+  - Speeds up any future filtering or grouping by author (for example, if you later add a “show more from this author” feature).
+- **`FULLTEXT INDEX idx_quote_fulltext (quote, category)`**
+  - Powers natural‑language search over both the `quote` text and `category` tags using MySQL’s `MATCH(...) AGAINST (...)` full‑text engine.
+  - This is preferable to scanning with `LIKE '%...%'` for every query because it can use relevance scoring and scales better to large datasets.
+
+The CSV importer (`src/importer.py`) uses `quote_hash` plus the `UNIQUE` index and `INSERT IGNORE` to make imports **idempotent**, so the same file (including the Kaggle quotes dataset referenced in the assignment) can be imported multiple times without duplicating data, as long as the `quote` column content is unchanged.
+
+---
+
 ## Prerequisites
 
 - **Python**: 3.11 (or a compatible 3.x version).
@@ -88,6 +117,7 @@ Tests are under `tests/` and validate each of these components.
 - **Ollama** (optional but recommended):
   - Running locally at `http://localhost:11434`.
   - Model `qwen2.5:0.5b` available (or adjust the model in `src/llm.py`).
+  - This is a small (~0.5B parameter) model chosen so it is practical to run on CPU on a typical laptop via Ollama.
 
 ---
 
@@ -227,6 +257,8 @@ Internally, deduplication is done via:
 - A SHA‑256 hash of the stripped `quote` string.
 - A unique index on `quote_hash` in the `quotes` table.
 - `INSERT IGNORE` semantics.
+
+The importer is designed to work with large quote datasets such as the `quotes.csv` file from the Kaggle dataset [“Quotes‑500K”](https://www.kaggle.com/datasets/manann/quotes-500k), as long as the CSV exposes at least the `quote` column (and optionally `author` and `category`).
 
 ---
 
@@ -370,5 +402,35 @@ The code follows standard Python best practices:
 - **Encoding issues with CSV**
   - Importer opens files as UTF‑8 with `errors="replace"`.
   - If you see strange characters, ensure your CSV is saved as UTF‑8.
+
+---
+
+## Edge cases and limitations
+
+This section documents how the application behaves in edge cases and where its current limits are:
+
+- **Malformed CSV rows**
+  - Rows without a non‑empty `quote` field (or with quotes shorter than 5 characters) are skipped and counted as `errors` in the final stats.
+  - Any unexpected exception while parsing a row is logged as a warning and the row is skipped; import continues.
+
+- **LLM failures (timeouts, connection errors, garbage output)**
+  - If the LLM request times out, Ollama is not running, or the response is not valid JSON, `extract_keywords` falls back to a simple keyword extraction that:
+    - lowercases the query,
+    - drops common stopwords,
+    - keeps the remaining words (up to a small limit).
+  - Search and import still work; explanations may be omitted, and search quality may be slightly worse but remains functional.
+
+- **Empty or extremely long queries**
+  - Empty or all‑whitespace queries are ignored: no database call is made and an empty result list is returned.
+  - Very long queries are truncated to a maximum of 500 characters before being sent to the LLM and the database, to protect both components from pathological inputs while preserving the core meaning of typical user queries.
+
+- **Queries in other languages**
+  - Non‑English queries are passed through the same pipeline (LLM keyword extraction + MySQL full‑text search). There is no special language detection; behavior depends on what the LLM and MySQL can handle for the given language.
+  - In practice this means the app will not crash on other languages, but relevance quality is tuned for English and may degrade for other languages.
+
+- **Database unreachable**
+  - If MySQL is down or credentials are incorrect, `get_connection` returns `None` and the CLI prints a clear error message (`❌ Database unreachable...`) and exits with a non‑zero status instead of failing with an unhandled exception.
+
+These behaviors are implemented in `src/importer.py`, `src/llm.py`, `src/search.py`, `src/db.py`, and are covered by unit tests where applicable.
 
 ---
