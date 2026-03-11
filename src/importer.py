@@ -1,8 +1,11 @@
 import csv
 import hashlib
-import mysql.connector
-from typing import Optional
+import logging
 from pathlib import Path
+
+import mysql.connector
+
+logger = logging.getLogger(__name__)
 
 
 def hash_quote(text: str) -> str:
@@ -32,7 +35,7 @@ def import_csv(
     """
 
     batch = []
-    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+    with path.open("r", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
 
         for line_num, row in enumerate(reader, start=2):
@@ -58,7 +61,7 @@ def import_csv(
 
             except Exception as e:
                 stats["errors"] += 1
-                print(f"[WARN] Skipping row {line_num}: {e}")
+                logger.warning("Skipping row %d: %s", line_num, e)
                 continue
 
     # Final batch
