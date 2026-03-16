@@ -1,16 +1,16 @@
 import argparse
-import logging
-
+import config
+from src.logger import setup_logging
 from src.cli import run_cli
-from src.db import DEFAULT_DATABASE, DEFAULT_HOST, DEFAULT_PASSWORD, DEFAULT_USER
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    setup_logging(config.LOG_FILE, config.LOG_LEVEL)
+
     parser = argparse.ArgumentParser(description="Book Quote Finder")
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--user", default=DEFAULT_USER)
-    parser.add_argument("--password", default=DEFAULT_PASSWORD)
-    parser.add_argument("--database", default=DEFAULT_DATABASE)
+    parser.add_argument("--host",     default=config.DB_HOST)
+    parser.add_argument("--user",     default=config.DB_USER)
+    parser.add_argument("--password", default=config.DB_PASSWORD)
+    parser.add_argument("--database", default=config.DB_NAME)
     args = parser.parse_args()
 
     run_cli(args.host, args.user, args.password, args.database)
