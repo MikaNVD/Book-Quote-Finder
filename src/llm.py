@@ -1,82 +1,135 @@
 import json
 import logging
+import time
 from typing import Optional
 
-import requests
+from langchain_ollama import OllamaLLM
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    before_sleep_log,
+    RetryError,
+)
+
+import config
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen2.5:0.5b"
+# Build LLM client once using config
+_llm = OllamaLLM(
+    model=config.OLLAMA_MODEL,
+    base_url=config.OLLAMA_BASE_URL,
+    temperature=0.3,
+    num_predict=200,
+    timeout=config.LLM_TIMEOUT,
+)
 
 
-def ask_llm(prompt: str, timeout: int = 15) -> Optional[str]:
+@retry(
+    stop=stop_after_attempt(config.LLM_MAX_RETRIES),
+    wait=wait_exponential(multiplier=1, min=1, max=5),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
+def _invoke(prompt: str) -> str:
+    """Raw LLM call with automatic retry on any exception."""
+    return _llm.invoke(prompt)
+
+
+def ask_llm(prompt: str) -> Optional[str]:
     """
-    Send a prompt to local Ollama. Returns response text or None on failure.
+    Send a prompt to Ollama. Retries up to LLM_MAX_RETRIES times.
+    Returns response text, or None if all attempts fail.
     """
-    payload = {
-        "model": MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": 0.3, "num_predict": 200}
-    }
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("response", "").strip()
-    except requests.exceptions.Timeout:
-        logger.warning("LLM request timed out — falling back to keyword search.")
-        return None
-    except requests.exceptions.ConnectionError:
-        logger.warning("Ollama not running — falling back to keyword search.")
+        result = _invoke(prompt)
+        logger.debug(f"LLM response received: {result[:80]!r}")
+        return result.strip() if result else None
+    except RetryError as e:
+        logger.warning(f"LLM failed after {config.LLM_MAX_RETRIES} retries: {e}")
         return None
     except Exception as e:
-        logger.exception("Unexpected LLM error: %s", e)
+        logger.warning(f"LLM unexpected error: {e}")
         return None
 
 
-def extract_keywords(user_query: str) -> list[str]:
+def _parse_keyword_json(raw: str) -> Optional[list[str]]:
+    """Extract a JSON array of strings from raw LLM output."""
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    start = clean.find("[")
+    end = clean.rfind("]") + 1
+    if start == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(clean[start:end])
+        if isinstance(parsed, list):
+            return [str(k).lower().strip() for k in parsed if str(k).strip()][:5]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+def extract_keywords(user_query: str) -> tuple[list[str], bool]:
     """
-    Use LLM to extract meaningful search keywords from a natural language query.
-    Falls back to simple word splitting if LLM fails.
+    Extract search keywords from a natural language query.
+
+    Tries two progressively simpler prompts before falling back to
+    naive stopword removal. Returns (keywords, used_llm).
     """
     if not user_query or len(user_query.strip()) < 2:
-        return []
+        return [], False
 
-    prompt = f"""Extract 3-5 single keywords for searching book quotes based on this query.
-Return ONLY a JSON array of lowercase strings. No explanation.
-Query: "{user_query}"
-Example output: ["hope", "failure", "resilience"]
-Output:"""
+    # Two prompt attempts: detailed first, simpler second
+    prompts = [
+        (
+            f'Extract 3-5 single search keywords from this query.\n'
+            f'Return ONLY a JSON array of lowercase strings. No explanation, no markdown.\n'
+            f'Query: "{user_query}"\n'
+            f'Output:'
+        ),
+        (
+            f'Keywords for "{user_query}". '
+            f'JSON array only, e.g. ["word1","word2"]: '
+        ),
+    ]
 
-    result = ask_llm(prompt)
+    for attempt_num, prompt in enumerate(prompts, start=1):
+        raw = ask_llm(prompt)
+        if raw:
+            keywords = _parse_keyword_json(raw)
+            if keywords:
+                logger.info(f"LLM keywords (attempt {attempt_num}): {keywords}")
+                return keywords, True
+            logger.warning(
+                f"LLM attempt {attempt_num} returned unparseable JSON: {raw[:80]!r}"
+            )
 
-    if result:
-        try:
-            # Strip any markdown fences if model adds them
-            clean = result.replace("```json", "").replace("```", "").strip()
-            keywords = json.loads(clean)
-            if isinstance(keywords, list):
-                return [str(k).lower().strip() for k in keywords if k][:5]
-        except (json.JSONDecodeError, ValueError):
-            pass  # Fall through to fallback
+    # Fallback: naive stopword removal
+    print("[SEARCH] LLM unavailable or returned invalid response — using keyword fallback.")
+    logger.info("Falling back to stopword keyword extraction.")
 
-    # Fallback: naive keyword extraction (remove stopwords)
     stopwords = {
-        "a", "about", "and", "any", "best", "concerning", "find", "for",
-        "get", "give", "good", "great", "in", "interesting", "like",
-        "looking", "me", "need", "nice", "or", "please", "quote", "quotes",
-        "regarding", "related", "search", "show", "some", "something",
-        "the", "theme", "topic", "want", "with",
+        "find", "me", "about", "some", "a", "an", "the", "in", "for",
+        "and", "or", "give", "show", "quotes", "something", "quote",
+        "want", "need", "looking", "search", "get", "please", "like",
+        "related", "topic", "regarding", "with", "any", "good", "great",
+        "best", "nice", "interesting", "something", "i", "my", "want",
     }
     words = user_query.lower().split()
-    return [w for w in words if w not in stopwords and len(w) > 3][:5]
+    fallback = [w.strip(".,!?") for w in words
+                if w not in stopwords and len(w) > 3][:5]
+    return fallback, False
 
 
 def explain_match(quote: str, user_query: str) -> Optional[str]:
-    """Ask LLM why a quote matches the user's query."""
-    prompt = f"""In one sentence, explain why this quote matches the search "{user_query}":
-Quote: "{quote[:200]}"
-Answer:"""
-    return ask_llm(prompt, timeout=10)
+    """Ask the LLM to explain in one sentence why a quote matches the query."""
+    prompt = (
+        f'In one sentence, explain why this quote matches the search "{user_query}":\n'
+        f'Quote: "{quote[:200]}"\n'
+        f'Answer:'
+    )
+    result = ask_llm(prompt)
+    if result:
+        logger.debug(f"Explanation generated for query '{user_query}'")
+    return result
