@@ -1,6 +1,6 @@
 import json
 import logging
-import time
+import re
 from typing import Optional
 
 from langchain_ollama import OllamaLLM
@@ -38,21 +38,21 @@ def _invoke(prompt: str) -> str:
 
 
 def ask_llm(prompt: str) -> Optional[str]:
-    """
-    Send a prompt to Ollama. Retries up to LLM_MAX_RETRIES times.
-    Returns response text, or None if all attempts fail.
-    """
     try:
         result = _invoke(prompt)
+        if not result:
+            return None
+        # Strip thinking blocks qwen models emit before the real response
+        result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
         logger.debug(f"LLM response received: {result[:80]!r}")
-        return result.strip() if result else None
+        return result if result else None
     except RetryError as e:
         logger.warning(f"LLM failed after {config.LLM_MAX_RETRIES} retries: {e}")
         return None
     except Exception as e:
         logger.warning(f"LLM unexpected error: {e}")
         return None
-
+        
 
 def _parse_keyword_json(raw: str) -> Optional[list[str]]:
     """Extract a JSON array of strings from raw LLM output."""
@@ -118,7 +118,8 @@ def extract_keywords(user_query: str) -> tuple[list[str], bool]:
     }
     words = user_query.lower().split()
     fallback = [w.strip(".,!?") for w in words
-                if w not in stopwords and len(w) > 3][:5]
+                if w not in stopwords and len(w) > 1  # ← keeps anything 2+ characters
+                ]
     return fallback, False
 
 
