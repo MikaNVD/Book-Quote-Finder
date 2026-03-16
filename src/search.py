@@ -1,47 +1,49 @@
 import logging
 import random
-from typing import Optional
-
 import mysql.connector
-
 from src.llm import extract_keywords, explain_match
 
 logger = logging.getLogger(__name__)
-
-# Full-text search fetches a larger pool, then we sample from top N for variety.
-POOL_MULTIPLIER = 10
-TOP_POOL_SIZE = 20
 
 
 def keyword_search(
     conn: mysql.connector.MySQLConnection,
     keywords: list[str],
-    limit: int = 10
+    limit: int = 5,
 ) -> list[dict]:
+    """Full-text search. Fetches a larger pool and samples for variety."""
     if not keywords:
         return []
 
     search_term = " ".join(keywords)
-    try:
-        with conn.cursor(dictionary=True) as cursor:
-            cursor.execute("""
-                SELECT id, quote, author, category,
-                       MATCH(quote, category) AGAINST (%s IN NATURAL LANGUAGE MODE) AS score
-                FROM quotes
-                WHERE MATCH(quote, category) AGAINST (%s IN NATURAL LANGUAGE MODE)
-                ORDER BY score DESC
-                LIMIT %s
-            """, (search_term, search_term, limit * POOL_MULTIPLIER))
-            pool = cursor.fetchall()
+    cursor = conn.cursor(dictionary=True)
 
-        if len(pool) > limit:
-            top_pool = pool[:TOP_POOL_SIZE]
-            results = random.sample(top_pool, min(limit, len(top_pool)))
-            results.sort(key=lambda x: x.get("score", 0), reverse=True)
-        else:
-            results = pool
-    except mysql.connector.Error:
-        results = like_search(conn, keywords, limit)
+    try:
+        cursor.execute(
+            """
+            SELECT id, quote, author, category,
+                   MATCH(quote, category) AGAINST (%s IN NATURAL LANGUAGE MODE) AS score
+            FROM quotes
+            WHERE MATCH(quote, category) AGAINST (%s IN NATURAL LANGUAGE MODE)
+            ORDER BY score DESC
+            LIMIT %s
+            """,
+            (search_term, search_term, limit * 10),
+        )
+        pool = cursor.fetchall()
+        logger.debug(f"FULLTEXT search for {keywords!r} returned {len(pool)} candidates.")
+    except mysql.connector.Error as e:
+        logger.warning(f"FULLTEXT search failed, falling back to LIKE: {e}")
+        pool = like_search(conn, keywords, limit)
+    finally:
+        cursor.close()
+
+    if len(pool) > limit:
+        top = pool[:20]  # sample only from top 20 by relevance
+        results = random.sample(top, min(limit, len(top)))
+        results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    else:
+        results = pool
 
     return results
 
@@ -49,51 +51,59 @@ def keyword_search(
 def like_search(
     conn: mysql.connector.MySQLConnection,
     keywords: list[str],
-    limit: int = 10,
+    limit: int = 5,
 ) -> list[dict]:
-    """Simple LIKE fallback when full-text search is unavailable."""
+    """Simple LIKE fallback search when FULLTEXT is unavailable."""
     if not keywords:
         return []
-    conditions = " OR ".join(["quote LIKE %s" for _ in keywords])
+    cursor = conn.cursor(dictionary=True)
+    conditions = " OR ".join(["quote LIKE %s"] * len(keywords))
     params = [f"%{kw}%" for kw in keywords] + [limit]
-    with conn.cursor(dictionary=True) as cursor:
-        cursor.execute(
-            f"SELECT id, quote, author, category FROM quotes WHERE {conditions} LIMIT %s",
-            params,
-        )
-        return cursor.fetchall()
+    cursor.execute(
+        f"SELECT id, quote, author, category FROM quotes WHERE {conditions} LIMIT %s",
+        params,
+    )
+    results = cursor.fetchall()
+    cursor.close()
+    logger.debug(f"LIKE search for {keywords!r} returned {len(results)} results.")
+    return results
 
 
 def search_quotes(
     conn: mysql.connector.MySQLConnection,
     user_query: str,
     use_explanations: bool = False,
-    limit: int = 5
+    limit: int = 5,
 ) -> list[dict]:
     """
-    Main search entrypoint. Uses LLM for keyword extraction, MySQL for retrieval.
+    Main search entrypoint.
+    Uses LLM for keyword extraction with fallback to stopword removal.
     """
-    query = user_query.strip() if user_query else ""
-    if not query:
-        logger.debug("Empty query provided")
+    if not user_query or not user_query.strip():
+        print("[SEARCH] Query was empty — please type something to search.")
         return []
 
-    user_query = query[:500]
-    keywords = extract_keywords(user_query)
+    user_query = user_query.strip()[:500]
+    print(f"\n🔍 Searching for: '{user_query}'")
+
+    keywords, used_llm = extract_keywords(user_query)
+
+    if not used_llm:
+        print("   ⚠️  Using keyword fallback (LLM unavailable).")
 
     if not keywords:
-        logger.debug("Could not extract keywords from: %r", user_query[:80])
+        print("[SEARCH] Could not extract any keywords from your query.")
+        logger.warning(f"No keywords extracted from query: {user_query!r}")
         return []
 
     print(f"   Keywords: {keywords}")
     results = keyword_search(conn, keywords, limit=limit)
 
     if use_explanations and results:
-        print("   Generating explanations (this may take a moment)...")
-        for r in results[:3]:  # Only explain top 3 to keep it fast
-            explanation = explain_match(r["quote"], user_query)
-            r["explanation"] = explanation or "Matched your search keywords."
+        print("   Generating explanations...")
+        for r in results[:3]:
             explanation = explain_match(r["quote"], user_query)
             r["explanation"] = explanation or "Matched your search keywords."
 
+    logger.info(f"Search '{user_query}' → {len(results)} results (LLM used: {used_llm})")
     return results
